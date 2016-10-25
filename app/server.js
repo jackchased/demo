@@ -16,7 +16,6 @@ server.listen(3030);
 ioServer.start(server);
 
 var app = function () {
-    var firstPermitJoin = true;
 
     setLeaveMsg();
 
@@ -42,25 +41,10 @@ var app = function () {
     });
 
     ioServer.regReqHdlr('permitJoin', function (args, cb) {
-        if (shepherd._enabled) {
+        if (shepherd._enabled)
             shepherd.permitJoin(args.time);
-        } else {
-            var timeLeft = 60,
-                timeDownCounter;
-
-            timeDownCounter = setInterval(function () {
-                if (timeLeft === 0)
-                    clearInterval(timeDownCounter);
-                shepherd.emit('permitJoining', timeLeft--);
-            }, 1000);
-        }
 
         cb(null, null);
-
-        if (firstPermitJoin) {
-            firstPermitJoin = false;
-            simpleApp();
-        }
     });
 
     ioServer.regReqHdlr('write', function (args, cb) {
@@ -71,15 +55,12 @@ var app = function () {
             val = args.value,
             ep = shepherd.find(ieeeAddr, epId);
 
-        if (ieeeAddr === '0x00124b0001ce1003') {
-            // ep.functional = model.functional;
-            toggleDev(ep, cid, val);
-        } else if (cid === 'genOnOff') {
+        if (cid === 'genOnOff') {
             var cmd = val ? 'on' : 'off';
-            ep.functional('genOnOff', cmd, {}, function (err, rsp) {});
+            ep.functional('genOnOff', cmd, {}, function (err, rsp) {
+                cb(null, val);
+            });
         }
-
-        cb(null, val);
     });
 
 /************************/
@@ -98,8 +79,48 @@ var app = function () {
     });
 
     shepherd.on('ind', function (msg) {
+        var pirEp, lightEp, plugEp, plugStatus;
+
         switch (msg.type) {
             case 'devIncoming':
+                if (msg.data === '0x00124b00072d9a1d') {  // ASUS Plug
+                    msg.endpoints[0].report('genOnOff', function () {
+                        console.log(arguments);
+                    });
+                } else if (msg.data === '0x000d6f000bb5508e') {  // ASUS Temp
+                    msg.endpoints[0].report('msTemperatureMeasurement').then(function () {
+                        return msg.endpoints[0].report('msRelativeHumidity');
+                    }).then(function () {
+                        console.log(arguments);
+                    }).fail(function () {
+                        console.log(arguments);
+                    }).done();
+                } else if (msg.data === '0x00124b000760b83c') {  // motion
+                    pirEp = msg.endpoints[0];
+
+                    pirEp.report('ssIasZone', function () {
+                        console.log(arguments);
+                    });
+                    pirEp.onZclFunctional = function (msg) {
+                        var zoneStatus = msg.zclMsg.payload.zonestatus,
+                            status = getZoneStatus(zoneStatus);
+
+                        console.log(status);
+
+                        var gadInfo = getGadInfo(pirEp)[0];
+
+                        gadInfo.value = status.alarm1;
+                        attrsChangeInd(pirEp.getIeeeAddr(), gadInfo);
+
+                        lightEp = shepherd.find('0x00137a000001dab8', 1);
+
+                        if (gadInfo.value && lightEp)
+                            lightEp.functional('genOnOff', 'on', {}, function (err, rsp) { });
+                        else if (!gadInfo.value && lightEp)
+                            lightEp.functional('genOnOff', 'off', {}, function (err, rsp) { });
+                    };
+                }
+
                 devIncomingInd(getDevInfo(msg.data, msg.endpoints));
                 break;
             case 'devStatus':
@@ -110,39 +131,27 @@ var app = function () {
                     data = msg.data,
                     ep;
 
-                attrsChangeInd(msg.endpoints[0].getIeeeAddr(), gadInfo);
+                _.forEach(gadInfo, function (info) {
+                    if (info.type === 'Plug' && data.cid === 'genOnOff')
+                        plugStatus =info.value = data.data.onOff;
 
-                if (gadInfo.type === 'Switch' && data.cid === 'genOnOff') {
-                    ep = shepherd.find('0x00124b0001ce1003', 2);
-                    if (!ep) return;
-                    toggleDev(ep, 'genOnOff', data.data.onOff);
-                }
+                    if (info.type === 'Temperature' && data.cid === 'msTemperatureMeasurement')
+                        info.value = data.data.measuredValue / 100;
 
-                if (gadInfo.type === 'Illuminance' && data.cid === 'msIlluminanceMeasurement') {
-                    ep = shepherd.find('0x00124b0001ce1003', 2);
-                    if (!ep) return;
-                    var light = ep.clusters.get('genOnOff', 'attrs', 'onOff');
-                    if (data.data.measuredValue < 50)  {
-                        toggleDev(ep, 'genOnOff', true);
-                        setTimeout(function () {
-                            attChangeInd(shepherd.find('0x00124b0001ce1002', 1), 'msIlluminanceMeasurement', 58);
-                        }, 3000);
-                    } else if (light){
-                        toggleDev(ep, 'genOnOff', false);
+                    if (info.type === 'Humidity' && data.cid === 'msRelativeHumidity') {
+                        info.value = data.data.measuredValue / 100;
+
+                        plugEp =  shepherd.find('0x00124b00072d9a1d', 12);
+
+                        if (info.value >= 80 && plugEp && plugStatus !== 1) {
+                            plugEp.functional('genOnOff', 'on', {}, function (err, rsp) { });
+                        } else if (info.value < 80 && plugEp && plugStatus !== 0) {
+                            plugEp.functional('genOnOff', 'off', {}, function (err, rsp) { });
+                        }
                     }
-                }
 
-                if (gadInfo.type === 'Pir' && data.cid === 'msOccupancySensing') {
-                    ep = shepherd.find('0x00124b0001ce1003', 2);
-                    if (!ep) return;
-                    toggleDev(ep, 'genOnOff', data.data.occupancy);
-                }
-
-                if (gadInfo.type === 'Flame' && data.cid === 'genBinaryInput') {
-                    ep = shepherd.find('0x00124b0001ce1003', 1);
-                    if (!ep) return;
-                    toggleDev(ep, 'genBinaryInput', data.data.presentValue);
-                }
+                    attrsChangeInd(msg.endpoints[0].getIeeeAddr(), info);
+                });
                 break;
             default:
                 break;
@@ -152,10 +161,12 @@ var app = function () {
 /**********************************/
 /* start shepherd                 */
 /**********************************/
-    shepherd.start(function (err) {console.log(shepherd.info());
+    shepherd.start(function (err) {
         showWelcomeMsg();
         if (err)
-            shepherd.emit('ready');
+            console.log(err);
+        else
+            console.log(shepherd.info());
     });
 };
 
@@ -259,8 +270,11 @@ function getDevInfo (ieeeAddr, eps) {
     eps.forEach(function (ep) {
         var gadInfo = getGadInfo(ep);
 
-        if (gadInfo)
-            dev.gads[gadInfo.auxId] = gadInfo;
+        if (gadInfo) {
+            _.forEach(gadInfo, function (info) {
+                dev.gads[info.auxId] = info;
+            });
+        }
     });
 
     return dev;
@@ -268,21 +282,32 @@ function getDevInfo (ieeeAddr, eps) {
 
 function getGadInfo (ep) {
     var epInfo = ep.dump(),
-        gadType = getGadType(epInfo);
+        gadType = getGadType(epInfo),
+        gads = [];
 
     if (!gadType) return;
 
-    var val = ep.clusters.get(gadType.cid, 'attrs', gadType.rid);
+    _.forEach(gadType, function (gad) {
+        var val = ep.clusters.get(gad.cid, 'attrs', gad.rid);
 
-    return {
-        type: gadType.type,
-        auxId: epInfo.epId + '/' + gadType.type + '/' + gadType.cid + '/' + gadType.rid,
-        value: _.isNumber(val) ? Math.round(val) : val
-    };
+        if (gad.rid === 'measuredValue')
+            val = val / 100;
+        else if (gad.rid === 'zoneStatus')
+            val = getZoneStatus(val).alarm1;
+
+        gads.push({
+            type: gad.type,
+            auxId: epInfo.epId + '/' + gad.type + '/' + gad.cid + '/' + gad.rid,
+            value: val
+        });
+    });
+
+    return gads;
 }
 
 function getGadType (epInfo) {
-    var prop = {
+    var props = [],
+        prop = {
             type: null,
             cid: null,
             rid: null
@@ -298,6 +323,7 @@ function getGadType (epInfo) {
                 prop.type = 'Switch';
                 prop.cid = 'genOnOff';
                 prop.rid = 'onOff';
+                props.push(prop);
             }
             break;
 
@@ -306,6 +332,16 @@ function getGadType (epInfo) {
                 prop.type = 'Illuminance';
                 prop.cid = 'msIlluminanceMeasurement';
                 prop.rid = 'measuredValue';
+                props.push(prop);
+            }
+            break;
+
+        case 81:    // smartPlug
+            if (epInfo.clusters.genOnOff) {
+                prop.type = 'Plug';
+                prop.cid = 'genOnOff';
+                prop.rid = 'onOff';
+                props.push(prop);
             }
             break;
 
@@ -316,29 +352,34 @@ function getGadType (epInfo) {
                 prop.type = 'Light';
                 prop.cid = 'genOnOff';
                 prop.rid = 'onOff';
+                props.push(prop);
             }
             break;
 
         case 770:   // temperatureSensor
             if (epInfo.clusters.msTemperatureMeasurement) {
-                prop.type = 'Temperature';
-                prop.cid = 'msTemperatureMeasurement';
-            } else if (epInfo.clusters.msRelativeHumidity) {
-                prop.type = 'Humidity';
-                prop.cid = 'msRelativeHumidity';
+                props.push({
+                    type: 'Temperature',
+                    cid: 'msTemperatureMeasurement',
+                    rid: 'measuredValue'
+                });
             }
-            prop.rid = 'measuredValue';
+
+            if (epInfo.clusters.msRelativeHumidity) {
+                props.push({
+                    type: 'Humidity',
+                    cid: 'msRelativeHumidity',
+                    rid: 'measuredValue'
+                });
+            }
             break;
 
         case 1026:  // iasZone
-            if (epInfo.clusters.genBinaryInput) {
-                prop.type = 'Flame';
-                prop.cid = 'genBinaryInput';
-                prop.rid = 'presentValue';
-            } else if (epInfo.clusters.msOccupancySensing) {
+            if (epInfo.clusters.ssIasZone) {
                 prop.type = 'Pir';
-                prop.cid = 'msOccupancySensing';
-                prop.rid = 'occupancy';
+                prop.cid = 'ssIasZone';
+                prop.rid = 'zoneStatus';
+                props.push(prop);
             }
             break;
 
@@ -347,6 +388,7 @@ function getGadType (epInfo) {
                 prop.type = 'Buzzer';
                 prop.cid = 'genBinaryInput';
                 prop.rid = 'presentValue';
+                props.push(prop);
             }
             break;
 
@@ -354,145 +396,23 @@ function getGadType (epInfo) {
             return;
     }
 
-    return prop;
+    return props;
 }
 
-function toggleDev (gad, cid, onOff) {
-    var cmd = onOff ? 'on' : 'off',
-        isMock = gad.functional('genOnOff', cmd, { }, function (err, rsp) { });
+function getZoneStatus(zoneStatus) {
+    var ZONE_STATUS_BITS = [
+            'alarm1', 'alarm2', 'tamper', 'battery', 
+            'supervisionReports', 'restoreReports', 'trouble', 'ac',
+            'reserved1', 'reserved2', 'reserved3', 'reserved4',
+            'reserved5', 'reserved6', 'reserved7', 'reserved8'
+        ],
+        status = {};
 
-    if (isMock)
-        attChangeInd(gad, cid, onOff);
-}
+    zoneStatus.toString(2).split('').reverse().forEach(function(bit, pos) {
+        status[ZONE_STATUS_BITS[pos]] = (bit === '1');
+    });
 
-function attChangeInd (ep, cid, value) {
-    var gadType = getGadType(ep),
-        msg = {
-            type: 'devChange',
-            endpoints: [ ep ],
-            data: {
-                cid: cid,
-                data: {}
-            }
-        };
-
-    msg.data.data[gadType.rid] = value;
-    ep.clusters.set(gadType.cid, 'attrs', gadType.rid, value);
-
-    shepherd.emit('ind', msg);
-}
-
-function simpleApp () {
-    var ctrlDev = model.ctrlDev,
-        sensorDev = model.sensorDev,
-        weatherDev = model.weatherDev;
-
-    if (!shepherd.find('0x00124b0001ce1001', 1)) {
-        shepherd._registerDev(weatherDev).then(function () {
-            return shepherd._registerDev(sensorDev);
-        }).then(function () {
-            return shepherd._registerDev(ctrlDev);
-        }).done();
-    } else {
-        var devs = [ weatherDev, sensorDev, ctrlDev ];
-        devs.forEach(function (dev) {
-            dev = shepherd._findDevByAddr(dev.ieeeAddr);
-            dev.update({ status: 'online', joinTime: Math.floor(Date.now()/1000) });
-            _.forEach(dev.epList, function (epId) {
-                var ep = shepherd.find(dev.ieeeAddr, epId);
-                ep.functional = model.functional;
-            });
-        });
-        shepherd._devbox.maintain(function (err){ });
-    }
-
-    setTimeout(function () {
-        toastInd('Device ' + weatherDev.ieeeAddr + ' will join: Temp. + Humid. Sensors');
-
-        setTimeout(function () {
-            var endpoints = [];
-            _.forEach(weatherDev.epList, function (epId) {
-                endpoints.push(weatherDev.getEndpoint(epId));
-            });
-            shepherd.emit('ind', { type: 'devIncoming', endpoints: endpoints, data: weatherDev.ieeeAddr });
-            shepherd.emit('ind', { type: 'devStatus', endpoints: endpoints, data: 'online' });
-            attChangeInd(weatherDev.getEndpoint(1), 'msTemperatureMeasurement', 26);
-            attChangeInd(weatherDev.getEndpoint(2), 'msRelativeHumidity', 40);
-        }, 3000);
-
-        setInterval(function () {
-            var tempVal = 25 + Math.random() * 5,
-                humidVal = 40 + Math.random() * 10;
-            attChangeInd(weatherDev.getEndpoint(1), 'msTemperatureMeasurement', tempVal);
-            attChangeInd(weatherDev.getEndpoint(2), 'msRelativeHumidity', humidVal);
-        }, 5000);
-    }, 1000);
-
-    setTimeout(function () {
-        toastInd('Device ' + sensorDev.ieeeAddr + ' will join: Illum. + PIR + Flame Sensors');
-
-        setTimeout(function () {
-            var endpoints = [];
-            _.forEach(sensorDev.epList, function (epId) {
-                endpoints.push(sensorDev.getEndpoint(epId));
-            });
-            shepherd.emit('ind', { type: 'devIncoming', endpoints: endpoints, data: sensorDev.ieeeAddr });
-            shepherd.emit('ind', { type: 'devStatus', endpoints: endpoints, data: 'online' });
-        }, 3000);
-    }, 5000);
-
-    setTimeout(function () {
-        toastInd('Device ' + ctrlDev.ieeeAddr + ' will join: On/Off Switch + Light Bulb + Buzzer');
-
-        setTimeout(function () {
-            var endpoints = [];
-            _.forEach(ctrlDev.epList, function (epId) {
-                endpoints.push(ctrlDev.getEndpoint(epId));
-            });
-            shepherd.emit('ind', { type: 'devIncoming', endpoints: endpoints, data: ctrlDev.ieeeAddr });
-            shepherd.emit('ind', { type: 'devStatus', endpoints: endpoints, data: 'online' });
-        }, 3000);
-    }, 9000);
-
-    setTimeout(function () {
-        toastInd('You can try to click on the Light Bulb and Buzzer');
-    }, 13000);
-
-    setTimeout(function () {
-        toastInd('Someone turn On the Light Bulb by On/Off Switch');
-        attChangeInd(ctrlDev.getEndpoint(3), 'genOnOff', true);       // turn on the light switch 
-
-        setTimeout(function () {
-            attChangeInd(ctrlDev.getEndpoint(3), 'genOnOff', false);  // turn off the light switch
-        }, 5000);
-    }, 22000);
-
-    setTimeout(function () {
-        toastInd('Illumination < 50 lux, Light Bulb would be turned On');
-        attChangeInd(sensorDev.getEndpoint(1), 'msIlluminanceMeasurement', 39);
-    }, 30000);
-
-    setTimeout(function () {
-        toastInd('Auto light up when PIR sensed someone walking around');
-        attChangeInd(sensorDev.getEndpoint(3), 'msOccupancySensing', true);
-
-        setTimeout(function () {
-            attChangeInd(sensorDev.getEndpoint(3), 'msOccupancySensing', false);
-        }, 6000);
-    }, 36000);
-
-    setTimeout(function () {
-        toastInd('Buzzing ..., Fire detected!!');
-        attChangeInd(sensorDev.getEndpoint(2), 'genBinaryInput', true);
-
-        setTimeout(function () {
-            attChangeInd(sensorDev.getEndpoint(2), 'genBinaryInput', false);
-        }, 6000);
-    }, 45000);
-
-    setTimeout(function () {
-        toastInd('Demo Ended!');
-    }, 52000);
+    return status;
 }
 
 module.exports = app;
