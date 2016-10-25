@@ -10,12 +10,13 @@ var model = require('./model/model'),
     ioServer = require('./helpers/ioServer');
 
 var server = http.createServer(),
-    shepherd = new ZShepherd('/dev/ttyACM0', { net: { panId: 0x7c71 } });
+    shepherd = new ZShepherd('/dev/ttyACM0', { net: { panId: 0x7c71 }, dbPath: __dirname + '/database/dev.db' });
 
 server.listen(3030);
 ioServer.start(server);
 
 var app = function () {
+    var plugStatus = 0;
 
     setLeaveMsg();
 
@@ -79,33 +80,25 @@ var app = function () {
     });
 
     shepherd.on('ind', function (msg) {
-        var pirEp, lightEp, plugEp, plugStatus;
+        var pirEp, lightEp, plugEp;
 
         switch (msg.type) {
             case 'devIncoming':
                 if (msg.data === '0x00124b00072d9a1d') {  // ASUS Plug
-                    msg.endpoints[0].report('genOnOff', function () {
-                        console.log(arguments);
-                    });
+                    msg.endpoints[0].report('genOnOff', function () { });
                 } else if (msg.data === '0x000d6f000bb5508e') {  // ASUS Temp
                     msg.endpoints[0].report('msTemperatureMeasurement').then(function () {
                         return msg.endpoints[0].report('msRelativeHumidity');
-                    }).then(function () {
-                        console.log(arguments);
                     }).fail(function () {
-                        console.log(arguments);
+
                     }).done();
                 } else if (msg.data === '0x00124b000760b83c') {  // motion
                     pirEp = msg.endpoints[0];
 
-                    pirEp.report('ssIasZone', function () {
-                        console.log(arguments);
-                    });
+                    pirEp.report('ssIasZone', function () {});
                     pirEp.onZclFunctional = function (msg) {
                         var zoneStatus = msg.zclMsg.payload.zonestatus,
                             status = getZoneStatus(zoneStatus);
-
-                        console.log(status);
 
                         var gadInfo = getGadInfo(pirEp)[0];
 
@@ -132,8 +125,11 @@ var app = function () {
                     ep;
 
                 _.forEach(gadInfo, function (info) {
-                    if (info.type === 'Plug' && data.cid === 'genOnOff')
-                        plugStatus =info.value = data.data.onOff;
+                    if (info.type === 'Plug' && data.cid === 'genOnOff' && plugStatus !== data.data.onOff) {
+                        plugStatus = data.data.onOff;
+                        info.value = data.data.onOff;
+                    } else if (info.type === 'Plug' && data.cid === 'genOnOff' && plugStatus === data.data.onOff)
+                        return;
 
                     if (info.type === 'Temperature' && data.cid === 'msTemperatureMeasurement')
                         info.value = data.data.measuredValue / 100;
