@@ -119,7 +119,7 @@ var app = function () {
             case 'devLeaving':
                 devStatusInd(msg.data, 'offline');
                 break;
-            case 'devStatus':console.log(msg);
+            case 'devStatus':
                 devStatusInd(msg.endpoints[0].getIeeeAddr(), msg.data);
                 break;
             case 'devChange':
