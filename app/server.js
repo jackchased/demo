@@ -116,7 +116,10 @@ var app = function () {
 
                 devIncomingInd(getDevInfo(msg.data, msg.endpoints));
                 break;
-            case 'devStatus':
+            case 'devLeaving':
+                devStatusInd(msg.data, 'offline');
+                break;
+            case 'devStatus':console.log(msg);
                 devStatusInd(msg.endpoints[0].getIeeeAddr(), msg.data);
                 break;
             case 'devChange':
@@ -139,9 +142,9 @@ var app = function () {
 
                         plugEp =  shepherd.find('0x00124b00072d9a1d', 12);
 
-                        if (info.value >= 80 && plugEp && plugStatus !== 1) {
+                        if (info.value >= 80 && plugEp && plugStatus !== 1) {        // if Humid value >= 80, Plug on
                             plugEp.functional('genOnOff', 'on', {}, function (err, rsp) { });
-                        } else if (info.value < 80 && plugEp && plugStatus !== 0) {
+                        } else if (info.value < 80 && plugEp && plugStatus !== 0) {  // Plug off
                             plugEp.functional('genOnOff', 'off', {}, function (err, rsp) { });
                         }
                     }
