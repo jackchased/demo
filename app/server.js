@@ -6,8 +6,7 @@ var _ = require('busyman'),
     chalk = require('chalk'),
     ZShepherd = require('zigbee-shepherd');
 
-var model = require('./model/model'),
-    ioServer = require('./helpers/ioServer');
+var ioServer = require('./helpers/ioServer');
 
 var server = http.createServer(),
     shepherd = new ZShepherd('/dev/ttyACM0', { net: { panId: 0x7c71 }, dbPath: __dirname + '/database/dev.db' });
@@ -84,28 +83,34 @@ var app = function () {
 
         switch (msg.type) {
             case 'devIncoming':
-                if (msg.data === '0x00124b00072d9a1d') {  // ASUS Plug
+                var info = getDevInfo(msg.data, msg.endpoints);
+
+                if (msg.data === '0x00124b00072d9a1d') {         // ASUS Plug
                     msg.endpoints[0].report('genOnOff', function () { });
                 } else if (msg.data === '0x000d6f000bb5508e') {  // ASUS Temp
                     msg.endpoints[0].report('msTemperatureMeasurement').then(function () {
                         return msg.endpoints[0].report('msRelativeHumidity');
                     }).fail(function () {
-
+                        return;
                     }).done();
                 } else if (msg.data === '0x00124b000760b83c') {  // motion
                     pirEp = msg.endpoints[0];
+                    lightEp = shepherd.find('0x00137a000001dab8', 1);
+
+                    if (info.gads['1/Pir/ssIasZone/zoneStatus'].value  && lightEp)
+                        lightEp.functional('genOnOff', 'on', {}, function (err, rsp) { });
+                    else if (!info.gads['1/Pir/ssIasZone/zoneStatus'].value && lightEp)
+                        lightEp.functional('genOnOff', 'off', {}, function (err, rsp) { });
 
                     pirEp.report('ssIasZone', function () {});
+
                     pirEp.onZclFunctional = function (msg) {
                         var zoneStatus = msg.zclMsg.payload.zonestatus,
-                            status = getZoneStatus(zoneStatus);
-
-                        var gadInfo = getGadInfo(pirEp)[0];
+                            status = getZoneStatus(zoneStatus),
+                            gadInfo = getGadInfo(pirEp)[0];
 
                         gadInfo.value = status.alarm1;
                         attrsChangeInd(pirEp.getIeeeAddr(), gadInfo);
-
-                        lightEp = shepherd.find('0x00137a000001dab8', 1);
 
                         if (gadInfo.value && lightEp)
                             lightEp.functional('genOnOff', 'on', {}, function (err, rsp) { });
@@ -114,7 +119,7 @@ var app = function () {
                     };
                 }
 
-                devIncomingInd(getDevInfo(msg.data, msg.endpoints));
+                devIncomingInd(info);
                 break;
             case 'devLeaving':
                 devStatusInd(msg.data, 'offline');
